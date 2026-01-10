@@ -1,0 +1,28 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(wsId) {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/workspaces/$(wsId)/members/$(request.auth.uid));
+    }
+
+    function role(wsId) {
+      return firestore.get(/databases/(default)/documents/workspaces/$(wsId)/members/$(request.auth.uid)).data.role;
+    }
+
+    function canWrite(wsId) {
+      return isMember(wsId) && (role(wsId) == "Admin" || role(wsId) == "Editor");
+    }
+
+    // Guardamos adjuntos en: workspaces/{wsId}/tasks/{taskId}/{filename}
+    match /workspaces/{wsId}/tasks/{taskId}/{allPaths=**} {
+      allow read: if isMember(wsId);
+      allow write: if canWrite(wsId);
+    }
+  }
+}
+

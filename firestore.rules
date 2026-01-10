@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function memberDoc(wsId) {
+      return get(/databases/$(database)/documents/workspaces/$(wsId)/members/$(request.auth.uid));
+    }
+
+    function isMember(wsId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/workspaces/$(wsId)/members/$(request.auth.uid));
+    }
+
+    function role(wsId) {
+      return memberDoc(wsId).data.role;
+    }
+
+    function canRead(wsId) {
+      return isMember(wsId);
+    }
+
+    function canWriteTasks(wsId) {
+      return isMember(wsId) && (role(wsId) in ['Admin', 'Editor']);
+    }
+
+    function isAdmin(wsId) {
+      return isMember(wsId) && role(wsId) == 'Admin';
+    }
+
+    match /workspaces/{wsId} {
+      // IMPORTANTE: Firestore evalúa rules también cuando el doc NO existe.
+      // Para bootstrap (wsId determinista), permitimos GET del propio ws aunque aún no exista.
+      allow get: if (isSignedIn() && wsId == ('ws_' + request.auth.uid)) || canRead(wsId);
+      // No necesitamos listar workspaces en MVP
+      allow list: if false;
+      // settings del workspace: solo admin
+      // creación inicial (Spark-friendly): el owner crea el workspace
+      allow create: if isSignedIn() &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.createdBy == request.auth.uid &&
+        wsId == ('ws_' + request.auth.uid);
+      allow update, delete: if isAdmin(wsId);
+
+      match /members/{userId} {
+        allow read: if canRead(wsId) || (isSignedIn() && userId == request.auth.uid);
+        allow create, delete: if isAdmin(wsId);
+        // Usuario puede actualizar sus prefs (timezone/notificaciones/snooze) sin poder escalar rol
+        allow update: if isAdmin(wsId) ||
+          (isSignedIn() &&
+            request.auth.uid == userId &&
+            request.resource.data.role == resource.data.role &&
+            request.resource.data.email == resource.data.email);
+        // Bootstrap: el owner puede crear su propio member admin si es el owner del workspace
+        allow create: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.resource.data.role == 'Admin' &&
+          get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerUid == request.auth.uid;
+      }
+
+      match /tasks/{taskId} {
+        allow read: if canRead(wsId);
+        allow create, update, delete: if canWriteTasks(wsId);
+
+        match /comments/{commentId} {
+          allow read: if canRead(wsId);
+          allow create, update, delete: if canWriteTasks(wsId);
+        }
+
+        match /activity/{activityId} {
+          allow read: if canRead(wsId);
+          // audit log: solo backend (admin SDK) en MVP
+          allow write: if false;
+        }
+      }
+
+      match /notificationTokens/{tokenId} {
+        allow read: if canRead(wsId);
+        // usuario puede registrar su propio token; validaremos ownerUid en código
+        allow create: if isSignedIn() && canRead(wsId) && request.resource.data.ownerUid == request.auth.uid;
+        allow update, delete: if isSignedIn() && canRead(wsId) && resource.data.ownerUid == request.auth.uid;
+      }
+
+      match /lists/{listId} {
+        allow read: if canRead(wsId);
+        allow create, update, delete: if canWriteTasks(wsId);
+      }
+
+      match /templates/{templateId} {
+        allow read: if canRead(wsId);
+        allow create, update, delete: if isAdmin(wsId);
+      }
+    }
+  }
+}
+
